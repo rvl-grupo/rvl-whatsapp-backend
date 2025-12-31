@@ -1,0 +1,334 @@
+import makeWASocket, {
+    DisconnectReason,
+    useMultiFileAuthState,
+    fetchLatestBaileysVersion,
+    makeCacheableSignalKeyStore,
+    WASocket,
+    ConnectionState,
+    proto,
+    downloadMediaMessage
+} from '@whiskeysockets/baileys';
+import { Boom } from '@hapi/boom';
+import pino from 'pino';
+import fs from 'fs';
+import path from 'path';
+import { databaseService } from './services/DatabaseService';
+import { connectionManager } from './services/ConnectionManager';
+import { mediaService } from './services/MediaService';
+
+// Logger configuration
+const logger = pino({ level: 'info' });
+
+interface InstanceState {
+    sock: WASocket | null;
+    qr: string | null;
+    status: 'connecting' | 'connected' | 'disconnected';
+}
+
+export class WhatsAppService {
+    private instances: Map<string, InstanceState> = new Map();
+    private latestVersion: any = null;
+    private baseAuthDir = path.resolve(__dirname, '..', 'sessions');
+
+    constructor() {
+        this.loadExistingSessions();
+    }
+
+    private async loadExistingSessions() {
+        if (!fs.existsSync(this.baseAuthDir)) {
+            fs.mkdirSync(this.baseAuthDir, { recursive: true });
+            return;
+        }
+
+        const folders = fs.readdirSync(this.baseAuthDir);
+        for (const folder of folders) {
+            const folderPath = path.join(this.baseAuthDir, folder);
+            if (fs.lstatSync(folderPath).isDirectory()) {
+                console.log(`📦 Restaurando sessão: ${folder}`);
+                this.initialize(folder).catch(console.error);
+            }
+        }
+    }
+
+    private async getBaileysVersion() {
+        if (!this.latestVersion) {
+            const { version, isLatest } = await fetchLatestBaileysVersion();
+            this.latestVersion = version;
+            console.log(`📦 Usando Baileys v${version} (Latest: ${isLatest})`);
+        }
+        return this.latestVersion;
+    }
+
+    public async initialize(instanceKey: string) {
+        // Anti-duplicação de conexão
+        if (connectionManager.isInitializing(instanceKey)) {
+            console.log(`⚠️ Instância [${instanceKey}] já está inicializando. Abortando duplicata.`);
+            return;
+        }
+
+        const currentState = this.instances.get(instanceKey);
+        if (currentState?.status === 'connected') return;
+
+        connectionManager.setInitializing(instanceKey, true);
+
+        try {
+            // Cleanup: Garante que a conexão anterior morreu de verdade
+            if (currentState?.sock) {
+                await connectionManager.cleanupSocket(currentState.sock);
+            }
+
+            await this.getBaileysVersion();
+            const authDir = path.join(this.baseAuthDir, instanceKey);
+            const { state, saveCreds } = await useMultiFileAuthState(authDir);
+
+            const sock = makeWASocket({
+                version: this.latestVersion,
+                logger,
+                printQRInTerminal: false, // Usar interface do CRM agora
+                auth: {
+                    creds: state.creds,
+                    keys: makeCacheableSignalKeyStore(state.keys, logger),
+                },
+                browser: [`Grupo RVL [${instanceKey}]`, 'Chrome', '1.0.0'],
+                generateHighQualityLinkPreview: true,
+                syncFullHistory: true,
+                shouldIgnoreJid: (jid) => jid.includes('status@broadcast'),
+                linkPreviewImageThumbnailWidth: 192,
+            });
+
+            this.instances.set(instanceKey, { sock, qr: null, status: 'connecting' });
+            await databaseService.syncInstanceStatus(instanceKey, 'connecting', null);
+
+            // 🔥 ITEM 3: Cleanup de Listeners (Memory Leak Fix)
+            // Removemos qualquer listener antigo para esta instância antes de registrar novos
+            sock.ev.removeAllListeners('creds.update');
+            sock.ev.removeAllListeners('connection.update');
+            sock.ev.removeAllListeners('messages.upsert');
+            sock.ev.removeAllListeners('messaging-history.set');
+            sock.ev.removeAllListeners('messages.update');
+
+            // Listeners
+            sock.ev.on('creds.update', saveCreds);
+            sock.ev.on('connection.update', (update) => this.handleConnectionUpdate(instanceKey, update));
+
+            sock.ev.on('messages.upsert', async ({ messages, type }) => {
+                if (type === 'notify') {
+                    for (const msg of messages) {
+                        try {
+                            await this.processIncomingMessage(msg, instanceKey);
+                        } catch (e) {
+                            console.error(`Erro [${instanceKey}] ao processar mensagem:`, e);
+                        }
+                    }
+                }
+            });
+
+            sock.ev.on('messaging-history.set', async ({ chats, messages }) => {
+                console.log(`📚 Sincronização de histórico [${instanceKey}]: ${chats.length} chats recebidos.`);
+                const activeChats = chats
+                    .filter(c => !c.readOnly && c.id && (c.id.endsWith('@s.whatsapp.net') || c.id.endsWith('@lid')))
+                    .sort((a, b) => (Number(b.conversationTimestamp) || 0) - (Number(a.conversationTimestamp) || 0));
+
+                for (const chat of activeChats) {
+                    try {
+                        const chatMsgs = messages
+                            .filter(m => m.key.remoteJid === chat.id)
+                            .sort((a, b) => (Number(b.messageTimestamp) || 0) - (Number(a.messageTimestamp) || 0))
+                            .slice(0, 50);
+
+                        if (chatMsgs.length > 0) {
+                            for (const m of chatMsgs.reverse()) {
+                                await this.processIncomingMessage(m, instanceKey, true);
+                            }
+                        } else {
+                            await databaseService.upsertChat(chat.id!, instanceKey, chat.name || 'Desconhecido', '[Histórico]', new Date().toISOString(), true);
+                        }
+                    } catch (e) { }
+                }
+            });
+
+            sock.ev.on('messages.update', async (updates) => {
+                for (const update of updates) {
+                    if (update.update.status) {
+                        await databaseService.updateMessageStatus(update.key.id!, update.update.status);
+                    }
+                }
+            });
+
+        } catch (error) {
+            console.error(`❌ Erro crítico na instância ${instanceKey}:`, error);
+            this.updateInstanceState(instanceKey, { status: 'disconnected' });
+            await databaseService.syncInstanceStatus(instanceKey, 'disconnected', null);
+        } finally {
+            connectionManager.setInitializing(instanceKey, false);
+        }
+    }
+
+    private updateInstanceState(key: string, updates: Partial<InstanceState>) {
+        const current = this.instances.get(key) || { sock: null, qr: null, status: 'disconnected' };
+        this.instances.set(key, { ...current, ...updates });
+    }
+
+    private async handleConnectionUpdate(instanceKey: string, update: Partial<ConnectionState>) {
+        const { connection, lastDisconnect, qr } = update;
+
+        if (connection === 'close') {
+            const { should, delay } = connectionManager.shouldReconnect(instanceKey, lastDisconnect);
+
+            console.log(`🔴 Conexão [${instanceKey}] FECHADA. Reconectando em ${delay}ms: ${should}`);
+
+            this.updateInstanceState(instanceKey, { status: 'disconnected', qr: null });
+            await databaseService.syncInstanceStatus(instanceKey, 'disconnected', null);
+
+            if (should) {
+                setTimeout(() => this.initialize(instanceKey), delay);
+            } else if ((lastDisconnect?.error as Boom)?.output?.statusCode === DisconnectReason.loggedOut) {
+                console.log(`❌ Logout na instância [${instanceKey}]. Limpando arquivos...`);
+                const authDir = path.join(this.baseAuthDir, instanceKey);
+                if (fs.existsSync(authDir)) fs.rmSync(authDir, { recursive: true, force: true });
+            }
+        } else if (connection === 'open') {
+            const sock = this.instances.get(instanceKey)?.sock;
+            const user = sock?.user;
+            console.log(`✅ Instância [${instanceKey}] CONECTADA: ${user?.id.split(':')[0]}`);
+
+            connectionManager.resetAttempts(instanceKey);
+            this.updateInstanceState(instanceKey, { status: 'connected', qr: null });
+            await databaseService.syncInstanceStatus(instanceKey, 'connected', null);
+            if (user?.id) {
+                await databaseService.updateInstanceDetails(instanceKey, user.id.split(':')[0], user.name || '');
+            }
+        }
+
+        if (qr) {
+            this.updateInstanceState(instanceKey, { qr, status: 'connecting' });
+            await databaseService.syncInstanceStatus(instanceKey, 'connecting', qr);
+        }
+    }
+
+    private async processIncomingMessage(msg: proto.IWebMessageInfo, instanceKey: string, isHistory: boolean = false) {
+        if (!msg.key || !msg.key.remoteJid) return;
+        const jid = msg.key.remoteJid;
+        if (jid === 'status@broadcast' || jid.endsWith('@g.us')) return;
+
+        try {
+            const protocolMsg = msg.message?.protocolMessage;
+            if (protocolMsg && protocolMsg.type === 0 && protocolMsg.key?.id) {
+                await databaseService.deleteMessageByWhatsappId(protocolMsg.key.id);
+                return;
+            }
+
+            const fromMe = msg.key.fromMe || false;
+            const pushName = msg.pushName || 'Desconhecido';
+            const messageContent = this.extractMessageContent(msg);
+            const timestamp = new Date((msg.messageTimestamp as number) * 1000).toISOString();
+
+            const chatId = await databaseService.upsertChat(jid, instanceKey, pushName, messageContent, timestamp, isHistory, fromMe);
+            if (!chatId) return;
+
+            await databaseService.syncContactAndLead(chatId, jid, pushName, instanceKey, isHistory, fromMe);
+
+            let mediaUrl;
+            if (this.isMediaMessage(msg)) {
+                mediaUrl = await this.handleMediaDownload(msg, instanceKey);
+            }
+
+            await databaseService.saveMessage(chatId, instanceKey, msg, messageContent, fromMe, timestamp, mediaUrl);
+
+        } catch (e) {
+            console.error(`❌ Erro no processamento da mensagem [${instanceKey}]:`, e);
+        }
+    }
+
+    private extractMessageContent(msg: proto.IWebMessageInfo): string {
+        const m = msg.message;
+        if (!m) return '[Mensagem vazia]';
+
+        const type = Object.keys(m)[0];
+
+        try {
+            if (type === 'conversation') return m.conversation || '';
+            if (type === 'extendedTextMessage') return m.extendedTextMessage?.text || '';
+            if (type === 'imageMessage') return `📷 ${m.imageMessage?.caption || 'Foto'}`;
+            if (type === 'videoMessage') return `🎥 ${m.videoMessage?.caption || 'Vídeo'}`;
+            if (type === 'audioMessage') {
+                const seconds = m.audioMessage?.seconds;
+                const duration = seconds ? `${Math.floor(seconds / 60)}:${(seconds % 60).toString().padStart(2, '0')}` : '';
+                return `🎤 Áudio ${duration}`.trim();
+            }
+            if (type === 'documentMessage') return `📄 ${m.documentMessage?.title || 'Documento'}`;
+            if (type === 'stickerMessage') return '🎨 Figurinha';
+            if (type === 'contactMessage') return '👤 Contato';
+            if (type === 'locationMessage') return '📍 Localização';
+        } catch (e) {
+            console.error('Erro ao extrair conteúdo:', e);
+        }
+
+        return '[mídia]';
+    }
+
+    private isMediaMessage(msg: proto.IWebMessageInfo): boolean {
+        const m = msg.message;
+        if (!m) return false;
+        return !!(m.imageMessage || m.videoMessage || m.audioMessage || m.documentMessage);
+    }
+
+    private async handleMediaDownload(msg: proto.IWebMessageInfo, instanceKey: string): Promise<string | undefined> {
+        try {
+            const mediaUrl = await mediaService.processMedia(msg, instanceKey);
+            return mediaUrl || undefined;
+        } catch (e) {
+            console.error('❌ Erro ao processar mídia:', e);
+            return undefined;
+        }
+    }
+
+    public async sendMessage(instanceKey: string, to: string, text: string, mediaUrl?: string, mediaType?: string, userName?: string) {
+        try {
+            const state = this.instances.get(instanceKey);
+            if (!state || !state.sock) throw new Error(`Instância [${instanceKey}] não está conectada`);
+
+            let jid = to.includes('@') ? to : `${to}@s.whatsapp.net`;
+            const textToWhatsApp = userName ? `*${userName}*:\n${text}` : text;
+            let payload: any = { text: textToWhatsApp };
+
+            const sent = await state.sock.sendMessage(jid, payload);
+            if (sent) {
+                await this.processIncomingMessage(sent, instanceKey);
+            }
+            return { success: true, messageId: sent?.key.id };
+        } catch (error: any) {
+            console.error(`❌ Erro fatal ao enviar mensagem [${instanceKey}]:`, error);
+            throw error;
+        }
+    }
+
+    public getStatus(instanceKey: string) {
+        return this.instances.get(instanceKey) || { status: 'disconnected', qr: null };
+    }
+
+    public async logout(instanceKey: string) {
+        const state = this.instances.get(instanceKey);
+        if (state?.sock) {
+            await connectionManager.cleanupSocket(state.sock);
+        }
+        const authDir = path.join(this.baseAuthDir, instanceKey);
+        if (fs.existsSync(authDir)) fs.rmSync(authDir, { recursive: true, force: true });
+        this.instances.delete(instanceKey);
+        await this.initialize(instanceKey);
+        return true;
+    }
+
+    public getAllInstances() {
+        return Array.from(this.instances.keys()).map(key => {
+            const state = this.instances.get(key);
+            return {
+                instance_key: key,
+                status: state?.status || 'disconnected',
+                qr: state?.qr || null
+            };
+        });
+    }
+}
+
+export const whatsappService = new WhatsAppService();
