@@ -257,6 +257,18 @@ export class WhatsAppService {
                     subStatus: 'Finalizando conexão...',
                     diagnostics: { step: 'Handshake WhatsApp', lastUpdate: new Date().toISOString() }
                 });
+
+                // Timeout de segurança: se após 90s ainda não tiver user.id, força reconexão
+                setTimeout(async () => {
+                    const currentState = this.instances.get(instanceKey);
+                    if (currentState?.status === 'connecting') {
+                        console.log(`⚠️ [${instanceKey}] Timeout de handshake detectado. Forçando reconexão...`);
+                        await connectionManager.cleanupSocket(currentState.sock!);
+                        this.instances.delete(instanceKey);
+                        connectionManager.setInitializing(instanceKey, false);
+                        setTimeout(() => this.initialize(instanceKey), 3000);
+                    }
+                }, 90000);
             }
         }
 
