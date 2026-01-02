@@ -1,3 +1,4 @@
+// DEPLOY_TRIGGER: 2026-01-02_11:15
 import makeWASocket, {
     DisconnectReason,
     fetchLatestBaileysVersion,
@@ -104,7 +105,7 @@ export class WhatsAppService {
                 },
                 browser: [`Grupo RVL [${instanceKey}]`, 'Chrome', '1.0.0'],
                 generateHighQualityLinkPreview: true,
-                syncFullHistory: true,
+                syncFullHistory: false, // Otimização: Não carregar histórico gigante no primeiro par para não travar o Render
                 shouldIgnoreJid: (jid) => jid.includes('status@broadcast'),
                 linkPreviewImageThumbnailWidth: 192,
             });

@@ -88,25 +88,32 @@ export const useSupabaseAuthState = async (
         }
     };
 
-    // Auxiliar para escrever vários dados de uma vez
+    // Auxiliar para escrever vários dados de uma vez (com chunking para evitar timeout)
     const writeMany = async (type: string, dataMap: { [id: string]: any }) => {
         try {
-            const upserts = Object.entries(dataMap).map(([id, payload]) => ({
-                instance_key: instanceKey,
-                data_type: type,
-                data_id: id,
-                payload: JSON.parse(JSON.stringify(payload, BufferJSON.replacer)),
-                updated_at: new Date().toISOString()
-            }));
+            const entries = Object.entries(dataMap);
+            if (entries.length === 0) return;
 
-            if (upserts.length === 0) return;
+            // Divide em lotes de 50 para não sobrecarregar o Render/Supabase
+            const chunkSize = 50;
+            for (let i = 0; i < entries.length; i += chunkSize) {
+                const chunk = entries.slice(i, i + chunkSize);
+                const upserts = chunk.map(([id, payload]) => ({
+                    instance_key: instanceKey,
+                    data_type: type,
+                    data_id: id,
+                    payload: JSON.parse(JSON.stringify(payload, BufferJSON.replacer)),
+                    updated_at: new Date().toISOString()
+                }));
 
-            const { error } = await supabase
-                .schema('sistema')
-                .from('whatsapp_sessions')
-                .upsert(upserts, { onConflict: 'instance_key,data_type,data_id' });
+                const { error } = await supabase
+                    .schema('sistema')
+                    .from('whatsapp_sessions')
+                    .upsert(upserts, { onConflict: 'instance_key,data_type,data_id' });
 
-            if (error) throw error;
+                if (error) throw error;
+                console.log(`[Auth] Gravado lote de ${chunk.length} chaves (${type}) no DB.`);
+            }
         } catch (error) {
             console.error(`❌ Erro ao salvar lote ${type} no Supabase:`, error);
         }
