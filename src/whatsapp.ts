@@ -1,6 +1,5 @@
 import makeWASocket, {
     DisconnectReason,
-    useMultiFileAuthState,
     fetchLatestBaileysVersion,
     makeCacheableSignalKeyStore,
     WASocket,
@@ -16,6 +15,7 @@ import path from 'path';
 import { databaseService } from './services/DatabaseService.js';
 import { connectionManager } from './services/ConnectionManager.js';
 import { mediaService } from './services/MediaService.js';
+import { useSupabaseAuthState } from './services/SupabaseAuthService.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -39,18 +39,21 @@ export class WhatsAppService {
     }
 
     private async loadExistingSessions() {
-        if (!fs.existsSync(this.baseAuthDir)) {
-            fs.mkdirSync(this.baseAuthDir, { recursive: true });
-            return;
-        }
+        try {
+            console.log('📦 Buscando sessões existentes no banco de dados...');
+            const { data: instances, error } = await databaseService.supabase
+                .schema('sistema')
+                .from('whatsapp_instances')
+                .select('instance_key');
 
-        const folders = fs.readdirSync(this.baseAuthDir);
-        for (const folder of folders) {
-            const folderPath = path.join(this.baseAuthDir, folder);
-            if (fs.lstatSync(folderPath).isDirectory()) {
-                console.log(`📦 Restaurando sessão: ${folder}`);
-                this.initialize(folder).catch(console.error);
+            if (error) throw error;
+
+            for (const inst of instances || []) {
+                console.log(`📦 Restaurando sessão: ${inst.instance_key}`);
+                this.initialize(inst.instance_key).catch(console.error);
             }
+        } catch (e) {
+            console.error('❌ Erro ao carregar sessões iniciais:', e);
         }
     }
 
@@ -82,8 +85,7 @@ export class WhatsAppService {
             }
 
             await this.getBaileysVersion();
-            const authDir = path.join(this.baseAuthDir, instanceKey);
-            const { state, saveCreds } = await useMultiFileAuthState(authDir);
+            const { state, saveCreds } = await useSupabaseAuthState(databaseService.supabase, instanceKey);
 
             const sock = makeWASocket({
                 version: this.latestVersion,

@@ -8,7 +8,7 @@ const supabaseUrl = process.env.SUPABASE_URL || '';
 const supabaseKey = process.env.SUPABASE_KEY || '';
 
 export class DatabaseService {
-    private supabase: SupabaseClient;
+    public supabase: SupabaseClient;
 
     constructor() {
         this.supabase = createClient(supabaseUrl, supabaseKey);
