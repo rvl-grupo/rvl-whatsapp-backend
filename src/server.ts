@@ -15,8 +15,15 @@ const app = express();
 const port = process.env.PORT || 3005;
 
 app.use(cors({
-    origin: ['https://app.gruporvl.com.br', 'http://localhost:5173'],
-    credentials: true
+    origin: [
+        'https://app.gruporvl.com.br',
+        'http://localhost:5173',
+        'http://localhost:3002',
+        'http://localhost:3000',
+        'https://rvl-whatsapp-backend.onrender.com'
+    ],
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS']
 }));
 app.use(express.json());
 
