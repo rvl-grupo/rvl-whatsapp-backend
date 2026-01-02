@@ -13,7 +13,7 @@ export const useSupabaseAuthState = async (
     instanceKey: string
 ): Promise<{ state: AuthenticationState, saveCreds: () => Promise<void> }> => {
 
-    // Auxiliar para ler dados do Supabase
+    // Auxiliar para ler dados do Supabase (único ID)
     const readData = async (type: string, id: string) => {
         try {
             const { data, error } = await supabase
@@ -33,10 +33,9 @@ export const useSupabaseAuthState = async (
         }
     };
 
-    // Auxiliar para escrever dados no Supabase
+    // Auxiliar para escrever dados no Supabase (único ID)
     const writeData = async (type: string, id: string, payload: any) => {
         try {
-            // Se for undefined ou null, deletamos o registro
             if (!payload) {
                 await supabase
                     .schema('sistema')
@@ -65,33 +64,79 @@ export const useSupabaseAuthState = async (
         }
     };
 
+    // Auxiliar para ler vários dados de uma vez
+    const readMany = async (type: string, ids: string[]) => {
+        try {
+            const { data, error } = await supabase
+                .schema('sistema')
+                .from('whatsapp_sessions')
+                .select('data_id, payload')
+                .eq('instance_key', instanceKey)
+                .eq('data_type', type)
+                .in('data_id', ids);
+
+            if (error) throw error;
+
+            const results: { [id: string]: any } = {};
+            data?.forEach(row => {
+                results[row.data_id] = JSON.parse(JSON.stringify(row.payload), BufferJSON.reviver);
+            });
+            return results;
+        } catch (error) {
+            console.error(`❌ Erro ao ler lote ${type} do Supabase:`, error);
+            return {};
+        }
+    };
+
+    // Auxiliar para escrever vários dados de uma vez
+    const writeMany = async (type: string, dataMap: { [id: string]: any }) => {
+        try {
+            const upserts = Object.entries(dataMap).map(([id, payload]) => ({
+                instance_key: instanceKey,
+                data_type: type,
+                data_id: id,
+                payload: JSON.parse(JSON.stringify(payload, BufferJSON.replacer)),
+                updated_at: new Date().toISOString()
+            }));
+
+            if (upserts.length === 0) return;
+
+            const { error } = await supabase
+                .schema('sistema')
+                .from('whatsapp_sessions')
+                .upsert(upserts, { onConflict: 'instance_key,data_type,data_id' });
+
+            if (error) throw error;
+        } catch (error) {
+            console.error(`❌ Erro ao salvar lote ${type} no Supabase:`, error);
+        }
+    };
+
     // Carregar creds iniciais
-    const creds: AuthenticationCreds = (await readData('creds', 'main')) || initAuthCreds();
+    const initialCreds = await readData('creds', 'main');
+    const creds: AuthenticationCreds = initialCreds || initAuthCreds();
 
     return {
         state: {
             creds,
             keys: {
                 get: async (type, ids) => {
+                    const results = await readMany(type, ids);
                     const data: { [id: string]: SignalDataTypeMap[typeof type] } = {};
-                    await Promise.all(
-                        ids.map(async (id) => {
-                            let value = await readData(type, id);
-                            if (type === 'app-state-sync-key' && value) {
-                                value = proto.Message.AppStateSyncKeyData.fromObject(value);
-                            }
-                            data[id] = value;
-                        })
-                    );
+
+                    for (const id of ids) {
+                        let value = results[id];
+                        if (type === 'app-state-sync-key' && value) {
+                            value = proto.Message.AppStateSyncKeyData.fromObject(value);
+                        }
+                        data[id] = value;
+                    }
                     return data;
                 },
                 set: async (data: any) => {
                     const tasks: Promise<void>[] = [];
                     for (const category in data) {
-                        for (const id in data[category]) {
-                            const value = data[category][id];
-                            tasks.push(writeData(category, id, value));
-                        }
+                        tasks.push(writeMany(category, data[category]));
                     }
                     await Promise.all(tasks);
                 },
