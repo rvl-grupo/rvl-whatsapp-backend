@@ -45,6 +45,21 @@ export class WhatsAppService {
     constructor() {
         // DESABILITADO: Auto-inicialização causa múltiplas conexões simultâneas
         // this.loadExistingSessions();
+
+        // LIMPAR SESSÕES ANTIGAS: Forçar QR Code novo
+        this.cleanOldSessions();
+    }
+
+    private cleanOldSessions() {
+        try {
+            if (fs.existsSync(this.baseAuthDir)) {
+                console.log('🧹 Limpando sessões antigas...');
+                fs.rmSync(this.baseAuthDir, { recursive: true, force: true });
+                console.log('✅ Sessões antigas removidas. QR Code novo será gerado.');
+            }
+        } catch (e) {
+            console.error('❌ Erro ao limpar sessões:', e);
+        }
     }
 
     private async loadExistingSessions() {
