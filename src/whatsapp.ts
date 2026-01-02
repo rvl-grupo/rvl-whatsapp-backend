@@ -3,6 +3,7 @@ import makeWASocket, {
     DisconnectReason,
     fetchLatestBaileysVersion,
     makeCacheableSignalKeyStore,
+    useMultiFileAuthState,
     WASocket,
     ConnectionState,
     proto,
@@ -94,7 +95,10 @@ export class WhatsAppService {
             }
 
             await this.getBaileysVersion();
-            const { state, saveCreds } = await useSupabaseAuthState(databaseService.supabase, instanceKey);
+
+            // SIMPLIFICADO: Usar armazenamento em arquivo (padrão Baileys)
+            const sessionPath = path.join(this.baseAuthDir, instanceKey);
+            const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
 
             const sock = makeWASocket({
                 version: this.latestVersion,
