@@ -193,10 +193,11 @@ export class WhatsAppService {
                 const finalDelay = isRestartRequired ? Math.max(delay, 2000) : delay;
                 console.log(`⏳ [${instanceKey}] Agendando reconexão em ${finalDelay}ms...`);
                 setTimeout(() => this.initialize(instanceKey), finalDelay);
-            } else if (statusCode === DisconnectReason.loggedOut) {
-                console.log(`❌ Logout na instância [${instanceKey}]. Limpando arquivos...`);
-                const authDir = path.join(this.baseAuthDir, instanceKey);
-                if (fs.existsSync(authDir)) fs.rmSync(authDir, { recursive: true, force: true });
+            } else if (statusCode === DisconnectReason.loggedOut || statusCode === 401) {
+                console.log(`❌ Logout ou Sessão Inválida na instância [${instanceKey}]. Resetando...`);
+                this.updateInstanceState(instanceKey, { status: 'disconnected', qr: null });
+                await databaseService.syncInstanceStatus(instanceKey, 'disconnected', null);
+                connectionManager.setInitializing(instanceKey, false);
             }
         } else if (connection === 'open') {
             const state = this.instances.get(instanceKey);
