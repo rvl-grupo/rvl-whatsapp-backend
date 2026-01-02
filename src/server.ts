@@ -39,7 +39,9 @@ app.get('/status/:instance?', (req, res) => {
     res.json({
         instance_key: instanceKey,
         status: state.status,
-        qrCode: state.qr // Mantendo compatibilidade de nome com o front
+        qrCode: state.qr,
+        subStatus: (state as any).subStatus,
+        diagnostics: (state as any).diagnostics
     });
 });
 

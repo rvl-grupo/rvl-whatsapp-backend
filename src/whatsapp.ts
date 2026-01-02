@@ -27,6 +27,12 @@ interface InstanceState {
     sock: WASocket | null;
     qr: string | null;
     status: 'connecting' | 'connected' | 'disconnected';
+    subStatus?: string;
+    diagnostics?: {
+        dbLatency?: number;
+        lastUpdate: string;
+        step: string;
+    };
 }
 
 export class WhatsAppService {
@@ -104,11 +110,26 @@ export class WhatsAppService {
             });
 
             // Inicializa a instância no Map com status inicial
-            this.instances.set(instanceKey, { sock, qr: null, status: 'connecting' });
+            this.updateInstanceState(instanceKey, {
+                status: 'connecting',
+                subStatus: 'Iniciando socket...',
+                diagnostics: { step: 'Aguardando QR Code', lastUpdate: new Date().toISOString() }
+            });
             await databaseService.syncInstanceStatus(instanceKey, 'connecting', null);
 
             // Listeners
-            sock.ev.on('creds.update', saveCreds);
+            sock.ev.on('creds.update', async (creds) => {
+                const start = Date.now();
+                await saveCreds();
+                const latency = Date.now() - start;
+                this.updateInstanceState(instanceKey, {
+                    diagnostics: {
+                        step: 'Salvando chaves no DB',
+                        dbLatency: latency,
+                        lastUpdate: new Date().toISOString()
+                    }
+                });
+            });
             sock.ev.on('connection.update', (update) => this.handleConnectionUpdate(instanceKey, update));
 
             sock.ev.on('messages.upsert', async ({ messages, type }) => {
@@ -204,15 +225,29 @@ export class WhatsAppService {
             const sock = state?.sock;
             const user = sock?.user;
 
+            this.updateInstanceState(instanceKey, {
+                subStatus: 'Handshake concluído!',
+                diagnostics: { step: 'Aguardando Perfil', lastUpdate: new Date().toISOString() }
+            });
+
             // ✅ SEGURANÇA MÁXIMA: Só marca como conectado se o ID estiver REALMENTE pronto
             if (user && user.id) {
                 console.log(`✅ [${instanceKey}] Instância Conectada e Estável: ${user.id.split(':')[0]}`);
                 connectionManager.resetAttempts(instanceKey);
-                this.updateInstanceState(instanceKey, { status: 'connected', qr: null });
+                this.updateInstanceState(instanceKey, {
+                    status: 'connected',
+                    qr: null,
+                    subStatus: 'Sincronizado',
+                    diagnostics: { step: 'Pronto para uso', lastUpdate: new Date().toISOString() }
+                });
                 await databaseService.syncInstanceStatus(instanceKey, 'connected', null);
                 await databaseService.updateInstanceDetails(instanceKey, user.id.split(':')[0], user.name || '');
             } else {
                 console.log(`⏳ [${instanceKey}] Conexão física aberta, aguardando handshake final do WhatsApp...`);
+                this.updateInstanceState(instanceKey, {
+                    subStatus: 'Finalizando conexão...',
+                    diagnostics: { step: 'Handshake WhatsApp', lastUpdate: new Date().toISOString() }
+                });
             }
         }
 
@@ -221,7 +256,12 @@ export class WhatsAppService {
             const currentState = this.instances.get(instanceKey);
             if (currentState?.qr !== qr) {
                 console.log(`[${instanceKey}] Novo QR Code gerado. Aguardando scan...`);
-                this.updateInstanceState(instanceKey, { qr, status: 'connecting' });
+                this.updateInstanceState(instanceKey, {
+                    qr,
+                    status: 'connecting',
+                    subStatus: 'Escaneie o QR Code',
+                    diagnostics: { step: 'Aguardando scan do celular', lastUpdate: new Date().toISOString() }
+                });
                 await databaseService.syncInstanceStatus(instanceKey, 'connecting', qr);
             }
         }
