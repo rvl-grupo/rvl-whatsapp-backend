@@ -51,8 +51,23 @@ app.get('/instances', (req, res) => {
     res.json(instances);
 });
 
+// Debounce para prevenir múltiplas reconexões simultâneas
+const reconnectDebounce = new Map<string, number>();
+
 app.post('/reconnect/:instance?', async (req, res) => {
     const instanceKey = req.params.instance || 'default';
+    const now = Date.now();
+    const lastCall = reconnectDebounce.get(instanceKey) || 0;
+
+    // Ignorar se última chamada foi há menos de 10 segundos
+    if (now - lastCall < 10000) {
+        return res.json({
+            success: false,
+            message: `Reconexão já em andamento para ${instanceKey}. Aguarde.`
+        });
+    }
+
+    reconnectDebounce.set(instanceKey, now);
     await whatsappService.initialize(instanceKey);
     res.json({ success: true, message: `Reconexão iniciada para ${instanceKey}` });
 });
