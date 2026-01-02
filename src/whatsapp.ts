@@ -193,8 +193,8 @@ export class WhatsAppService {
             }
 
             if (should) {
-                // Forçamos um delay maior se for erro 515 para dar tempo ao FS do Cloudways
-                const finalDelay = isRestartRequired ? Math.max(delay, 15000) : delay;
+                // Ajuste Fino: 2s é suficiente para FS rápido (Render) e evita timeout no celular
+                const finalDelay = isRestartRequired ? Math.max(delay, 2000) : delay;
                 console.log(`⏳ [${instanceKey}] Agendando reconexão em ${finalDelay}ms...`);
                 setTimeout(() => this.initialize(instanceKey), finalDelay);
             } else if (statusCode === DisconnectReason.loggedOut) {
