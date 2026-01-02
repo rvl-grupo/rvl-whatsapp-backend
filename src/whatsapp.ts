@@ -62,6 +62,7 @@ export class WhatsAppService {
             const { version, isLatest } = await fetchLatestBaileysVersion();
             this.latestVersion = version;
             console.log(`📦 Usando Baileys v${version} (Latest: ${isLatest})`);
+            console.log('🚀 [DIAGNOSTIC] Sessão limpa iniciada via banco de dados.');
         }
         return this.latestVersion;
     }
