@@ -147,16 +147,22 @@ export class WhatsAppService {
 
             sock.ev.on('messaging-history.set', async ({ chats, messages }) => {
                 console.log(`📚 Sincronização de histórico [${instanceKey}]: ${chats.length} chats recebidos.`);
+
+                // Filtro 1: Apenas chats ativos (não arquivados, não somente leitura)
                 const activeChats = chats
                     .filter(c => !c.readOnly && c.id && (c.id.endsWith('@s.whatsapp.net') || c.id.endsWith('@lid')))
-                    .sort((a, b) => (Number(b.conversationTimestamp) || 0) - (Number(a.conversationTimestamp) || 0));
+                    .sort((a, b) => (Number(b.conversationTimestamp) || 0) - (Number(a.conversationTimestamp) || 0))
+                    .slice(0, 20); // Filtro 2: Apenas os 20 chats mais recentes
+
+                const sevenDaysAgo = Date.now() / 1000 - (7 * 24 * 60 * 60); // Filtro 3: Últimos 7 dias
 
                 for (const chat of activeChats) {
                     try {
                         const chatMsgs = messages
                             .filter(m => m.key.remoteJid === chat.id)
+                            .filter(m => (Number(m.messageTimestamp) || 0) >= sevenDaysAgo) // Apenas últimos 7 dias
                             .sort((a, b) => (Number(b.messageTimestamp) || 0) - (Number(a.messageTimestamp) || 0))
-                            .slice(0, 50);
+                            .slice(0, 15); // Filtro 4: Máximo 15 mensagens por chat
 
                         if (chatMsgs.length > 0) {
                             for (const m of chatMsgs.reverse()) {
@@ -165,7 +171,9 @@ export class WhatsAppService {
                         } else {
                             await databaseService.upsertChat(chat.id!, instanceKey, chat.name || 'Desconhecido', '[Histórico]', new Date().toISOString(), true);
                         }
-                    } catch (e) { }
+                    } catch (e) {
+                        console.error(`Erro ao processar histórico do chat ${chat.id}:`, e);
+                    }
                 }
             });
 
