@@ -9,12 +9,16 @@ import makeWASocket, {
     downloadMediaMessage
 } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
-import pino from 'pino';
+import { pino } from 'pino';
+import { fileURLToPath } from 'url';
 import fs from 'fs';
 import path from 'path';
-import { databaseService } from './services/DatabaseService';
-import { connectionManager } from './services/ConnectionManager';
-import { mediaService } from './services/MediaService';
+import { databaseService } from './services/DatabaseService.js';
+import { connectionManager } from './services/ConnectionManager.js';
+import { mediaService } from './services/MediaService.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // Logger configuration
 const logger = pino({ level: 'info' });
@@ -173,36 +177,56 @@ export class WhatsAppService {
         const { connection, lastDisconnect, qr } = update;
 
         if (connection === 'close') {
+            const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
+            const isRestartRequired = statusCode === DisconnectReason.restartRequired || statusCode === 515;
+
             const { should, delay } = connectionManager.shouldReconnect(instanceKey, lastDisconnect);
 
-            console.log(`🔴 Conexão [${instanceKey}] FECHADA. Reconectando em ${delay}ms: ${should}`);
+            console.log(`🔴 Conexão [${instanceKey}] FECHADA (Code: ${statusCode}). Reconectando em ${delay}ms: ${should}`);
 
-            this.updateInstanceState(instanceKey, { status: 'disconnected', qr: null });
-            await databaseService.syncInstanceStatus(instanceKey, 'disconnected', null);
+            // ✅ ESTABILIDADE: Se for apenas um reinício, não avisamos o frontend para não trocar o QR Code
+            if (!isRestartRequired) {
+                this.updateInstanceState(instanceKey, { status: 'disconnected', qr: null });
+                await databaseService.syncInstanceStatus(instanceKey, 'disconnected', null);
+            } else {
+                console.log(`⏳ [${instanceKey}] Reinício técnico detectado (515). Mantendo estado para estabilidade...`);
+            }
 
             if (should) {
-                setTimeout(() => this.initialize(instanceKey), delay);
-            } else if ((lastDisconnect?.error as Boom)?.output?.statusCode === DisconnectReason.loggedOut) {
+                // Forçamos um delay maior se for erro 515 para dar tempo ao FS do Cloudways
+                const finalDelay = isRestartRequired ? Math.max(delay, 15000) : delay;
+                console.log(`⏳ [${instanceKey}] Agendando reconexão em ${finalDelay}ms...`);
+                setTimeout(() => this.initialize(instanceKey), finalDelay);
+            } else if (statusCode === DisconnectReason.loggedOut) {
                 console.log(`❌ Logout na instância [${instanceKey}]. Limpando arquivos...`);
                 const authDir = path.join(this.baseAuthDir, instanceKey);
                 if (fs.existsSync(authDir)) fs.rmSync(authDir, { recursive: true, force: true });
             }
         } else if (connection === 'open') {
-            const sock = this.instances.get(instanceKey)?.sock;
+            const state = this.instances.get(instanceKey);
+            const sock = state?.sock;
             const user = sock?.user;
-            console.log(`✅ Instância [${instanceKey}] CONECTADA: ${user?.id.split(':')[0]}`);
 
-            connectionManager.resetAttempts(instanceKey);
-            this.updateInstanceState(instanceKey, { status: 'connected', qr: null });
-            await databaseService.syncInstanceStatus(instanceKey, 'connected', null);
-            if (user?.id) {
+            // ✅ SEGURANÇA MÁXIMA: Só marca como conectado se o ID estiver REALMENTE pronto
+            if (user && user.id) {
+                console.log(`✅ [${instanceKey}] Instância Conectada e Estável: ${user.id.split(':')[0]}`);
+                connectionManager.resetAttempts(instanceKey);
+                this.updateInstanceState(instanceKey, { status: 'connected', qr: null });
+                await databaseService.syncInstanceStatus(instanceKey, 'connected', null);
                 await databaseService.updateInstanceDetails(instanceKey, user.id.split(':')[0], user.name || '');
+            } else {
+                console.log(`⏳ [${instanceKey}] Conexão física aberta, aguardando handshake final do WhatsApp...`);
             }
         }
 
         if (qr) {
-            this.updateInstanceState(instanceKey, { qr, status: 'connecting' });
-            await databaseService.syncInstanceStatus(instanceKey, 'connecting', qr);
+            // ✅ ESTABILIDADE: Só atualiza o QR se ele realmente mudou, evitando refrescos inúteis no frontend
+            const currentState = this.instances.get(instanceKey);
+            if (currentState?.qr !== qr) {
+                console.log(`[${instanceKey}] Novo QR Code gerado. Aguardando scan...`);
+                this.updateInstanceState(instanceKey, { qr, status: 'connecting' });
+                await databaseService.syncInstanceStatus(instanceKey, 'connecting', qr);
+            }
         }
     }
 
@@ -286,7 +310,18 @@ export class WhatsAppService {
     public async sendMessage(instanceKey: string, to: string, text: string, mediaUrl?: string, mediaType?: string, userName?: string) {
         try {
             const state = this.instances.get(instanceKey);
-            if (!state || !state.sock) throw new Error(`Instância [${instanceKey}] não está conectada`);
+
+            // 🔥 SEGURANÇA: Verifica se a instância existe e se o 'sock' está pronto
+            if (!state || !state.sock) {
+                console.log(`⚠️ Tentativa de envio ignorada: Instância [${instanceKey}] não inicializada.`);
+                return { success: false, error: 'Instância não inicializada' };
+            }
+
+            // 🔥 SEGURANÇA: Verifica se o usuário da conexão já foi carregado (Evita o crash do 'id')
+            if (!state.sock.user || !state.sock.user.id) {
+                console.log(`⚠️ Tentativa de envio ignorada: Instância [${instanceKey}] ainda está pareando.`);
+                return { success: false, error: 'Conexão em fase de pareamento' };
+            }
 
             let jid = to.includes('@') ? to : `${to}@s.whatsapp.net`;
             const textToWhatsApp = userName ? `*${userName}*:\n${text}` : text;
@@ -298,8 +333,9 @@ export class WhatsAppService {
             }
             return { success: true, messageId: sent?.key.id };
         } catch (error: any) {
-            console.error(`❌ Erro fatal ao enviar mensagem [${instanceKey}]:`, error);
-            throw error;
+            // ✅ SOLUÇÃO DEFINITIVA: Loga o erro mas NÃO mata o servidor com 'throw'
+            console.error(`❌ Erro [${instanceKey}] ao enviar. Sistema segue vivo. Detalhe:`, error.message);
+            return { success: false, error: error.message };
         }
     }
 

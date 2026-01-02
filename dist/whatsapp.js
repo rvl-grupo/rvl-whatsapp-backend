@@ -47,14 +47,14 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.whatsappService = exports.WhatsAppService = void 0;
 const baileys_1 = __importStar(require("@whiskeysockets/baileys"));
-const pino_1 = __importDefault(require("pino"));
+const pino_1 = require("pino");
 const fs_1 = __importDefault(require("fs"));
 const path_1 = __importDefault(require("path"));
-const DatabaseService_1 = require("./services/DatabaseService");
-const ConnectionManager_1 = require("./services/ConnectionManager");
-const MediaService_1 = require("./services/MediaService");
+const DatabaseService_js_1 = require("./services/DatabaseService.js");
+const ConnectionManager_js_1 = require("./services/ConnectionManager.js");
+const MediaService_js_1 = require("./services/MediaService.js");
 // Logger configuration
-const logger = (0, pino_1.default)({ level: 'info' });
+const logger = (0, pino_1.pino)({ level: 'info' });
 class WhatsAppService {
     constructor() {
         this.instances = new Map();
@@ -91,18 +91,18 @@ class WhatsAppService {
     initialize(instanceKey) {
         return __awaiter(this, void 0, void 0, function* () {
             // Anti-duplicação de conexão
-            if (ConnectionManager_1.connectionManager.isInitializing(instanceKey)) {
+            if (ConnectionManager_js_1.connectionManager.isInitializing(instanceKey)) {
                 console.log(`⚠️ Instância [${instanceKey}] já está inicializando. Abortando duplicata.`);
                 return;
             }
             const currentState = this.instances.get(instanceKey);
             if ((currentState === null || currentState === void 0 ? void 0 : currentState.status) === 'connected')
                 return;
-            ConnectionManager_1.connectionManager.setInitializing(instanceKey, true);
+            ConnectionManager_js_1.connectionManager.setInitializing(instanceKey, true);
             try {
                 // Cleanup: Garante que a conexão anterior morreu de verdade
                 if (currentState === null || currentState === void 0 ? void 0 : currentState.sock) {
-                    yield ConnectionManager_1.connectionManager.cleanupSocket(currentState.sock);
+                    yield ConnectionManager_js_1.connectionManager.cleanupSocket(currentState.sock);
                 }
                 yield this.getBaileysVersion();
                 const authDir = path_1.default.join(this.baseAuthDir, instanceKey);
@@ -122,7 +122,7 @@ class WhatsAppService {
                     linkPreviewImageThumbnailWidth: 192,
                 });
                 this.instances.set(instanceKey, { sock, qr: null, status: 'connecting' });
-                yield DatabaseService_1.databaseService.syncInstanceStatus(instanceKey, 'connecting', null);
+                yield DatabaseService_js_1.databaseService.syncInstanceStatus(instanceKey, 'connecting', null);
                 // 🔥 ITEM 3: Cleanup de Listeners (Memory Leak Fix)
                 // Removemos qualquer listener antigo para esta instância antes de registrar novos
                 sock.ev.removeAllListeners('creds.update');
@@ -162,7 +162,7 @@ class WhatsAppService {
                                 }
                             }
                             else {
-                                yield DatabaseService_1.databaseService.upsertChat(chat.id, instanceKey, chat.name || 'Desconhecido', '[Histórico]', new Date().toISOString(), true);
+                                yield DatabaseService_js_1.databaseService.upsertChat(chat.id, instanceKey, chat.name || 'Desconhecido', '[Histórico]', new Date().toISOString(), true);
                             }
                         }
                         catch (e) { }
@@ -171,7 +171,7 @@ class WhatsAppService {
                 sock.ev.on('messages.update', (updates) => __awaiter(this, void 0, void 0, function* () {
                     for (const update of updates) {
                         if (update.update.status) {
-                            yield DatabaseService_1.databaseService.updateMessageStatus(update.key.id, update.update.status);
+                            yield DatabaseService_js_1.databaseService.updateMessageStatus(update.key.id, update.update.status);
                         }
                     }
                 }));
@@ -179,10 +179,10 @@ class WhatsAppService {
             catch (error) {
                 console.error(`❌ Erro crítico na instância ${instanceKey}:`, error);
                 this.updateInstanceState(instanceKey, { status: 'disconnected' });
-                yield DatabaseService_1.databaseService.syncInstanceStatus(instanceKey, 'disconnected', null);
+                yield DatabaseService_js_1.databaseService.syncInstanceStatus(instanceKey, 'disconnected', null);
             }
             finally {
-                ConnectionManager_1.connectionManager.setInitializing(instanceKey, false);
+                ConnectionManager_js_1.connectionManager.setInitializing(instanceKey, false);
             }
         });
     }
@@ -192,17 +192,25 @@ class WhatsAppService {
     }
     handleConnectionUpdate(instanceKey, update) {
         return __awaiter(this, void 0, void 0, function* () {
-            var _a, _b, _c;
+            var _a, _b;
             const { connection, lastDisconnect, qr } = update;
             if (connection === 'close') {
-                const { should, delay } = ConnectionManager_1.connectionManager.shouldReconnect(instanceKey, lastDisconnect);
-                console.log(`🔴 Conexão [${instanceKey}] FECHADA. Reconectando em ${delay}ms: ${should}`);
-                this.updateInstanceState(instanceKey, { status: 'disconnected', qr: null });
-                yield DatabaseService_1.databaseService.syncInstanceStatus(instanceKey, 'disconnected', null);
+                const statusCode = (_b = (_a = lastDisconnect === null || lastDisconnect === void 0 ? void 0 : lastDisconnect.error) === null || _a === void 0 ? void 0 : _a.output) === null || _b === void 0 ? void 0 : _b.statusCode;
+                const isRestartRequired = statusCode === baileys_1.DisconnectReason.restartRequired || statusCode === 515;
+                const { should, delay } = ConnectionManager_js_1.connectionManager.shouldReconnect(instanceKey, lastDisconnect);
+                console.log(`🔴 Conexão [${instanceKey}] FECHADA (Code: ${statusCode}). Reconectando em ${delay}ms: ${should}`);
+                // ✅ ESTABILIDADE: Se for apenas um reinício, não avisamos o frontend para não trocar o QR Code
+                if (!isRestartRequired) {
+                    this.updateInstanceState(instanceKey, { status: 'disconnected', qr: null });
+                    yield DatabaseService_js_1.databaseService.syncInstanceStatus(instanceKey, 'disconnected', null);
+                }
+                else {
+                    console.log(`⏳ [${instanceKey}] Reinício técnico detectado (515). Mantendo estado para estabilidade...`);
+                }
                 if (should) {
                     setTimeout(() => this.initialize(instanceKey), delay);
                 }
-                else if (((_b = (_a = lastDisconnect === null || lastDisconnect === void 0 ? void 0 : lastDisconnect.error) === null || _a === void 0 ? void 0 : _a.output) === null || _b === void 0 ? void 0 : _b.statusCode) === baileys_1.DisconnectReason.loggedOut) {
+                else if (statusCode === baileys_1.DisconnectReason.loggedOut) {
                     console.log(`❌ Logout na instância [${instanceKey}]. Limpando arquivos...`);
                     const authDir = path_1.default.join(this.baseAuthDir, instanceKey);
                     if (fs_1.default.existsSync(authDir))
@@ -210,19 +218,29 @@ class WhatsAppService {
                 }
             }
             else if (connection === 'open') {
-                const sock = (_c = this.instances.get(instanceKey)) === null || _c === void 0 ? void 0 : _c.sock;
+                const state = this.instances.get(instanceKey);
+                const sock = state === null || state === void 0 ? void 0 : state.sock;
                 const user = sock === null || sock === void 0 ? void 0 : sock.user;
-                console.log(`✅ Instância [${instanceKey}] CONECTADA: ${user === null || user === void 0 ? void 0 : user.id.split(':')[0]}`);
-                ConnectionManager_1.connectionManager.resetAttempts(instanceKey);
-                this.updateInstanceState(instanceKey, { status: 'connected', qr: null });
-                yield DatabaseService_1.databaseService.syncInstanceStatus(instanceKey, 'connected', null);
-                if (user === null || user === void 0 ? void 0 : user.id) {
-                    yield DatabaseService_1.databaseService.updateInstanceDetails(instanceKey, user.id.split(':')[0], user.name || '');
+                // ✅ SEGURANÇA MÁXIMA: Só marca como conectado se o ID estiver REALMENTE pronto
+                if (user && user.id) {
+                    console.log(`✅ [${instanceKey}] Instância Conectada e Estável: ${user.id.split(':')[0]}`);
+                    ConnectionManager_js_1.connectionManager.resetAttempts(instanceKey);
+                    this.updateInstanceState(instanceKey, { status: 'connected', qr: null });
+                    yield DatabaseService_js_1.databaseService.syncInstanceStatus(instanceKey, 'connected', null);
+                    yield DatabaseService_js_1.databaseService.updateInstanceDetails(instanceKey, user.id.split(':')[0], user.name || '');
+                }
+                else {
+                    console.log(`⏳ [${instanceKey}] Conexão física aberta, aguardando handshake final do WhatsApp...`);
                 }
             }
             if (qr) {
-                this.updateInstanceState(instanceKey, { qr, status: 'connecting' });
-                yield DatabaseService_1.databaseService.syncInstanceStatus(instanceKey, 'connecting', qr);
+                // ✅ ESTABILIDADE: Só atualiza o QR se ele realmente mudou, evitando refrescos inúteis no frontend
+                const currentState = this.instances.get(instanceKey);
+                if ((currentState === null || currentState === void 0 ? void 0 : currentState.qr) !== qr) {
+                    console.log(`[${instanceKey}] Novo QR Code gerado. Aguardando scan...`);
+                    this.updateInstanceState(instanceKey, { qr, status: 'connecting' });
+                    yield DatabaseService_js_1.databaseService.syncInstanceStatus(instanceKey, 'connecting', qr);
+                }
             }
         });
     }
@@ -237,22 +255,22 @@ class WhatsAppService {
             try {
                 const protocolMsg = (_a = msg.message) === null || _a === void 0 ? void 0 : _a.protocolMessage;
                 if (protocolMsg && protocolMsg.type === 0 && ((_b = protocolMsg.key) === null || _b === void 0 ? void 0 : _b.id)) {
-                    yield DatabaseService_1.databaseService.deleteMessageByWhatsappId(protocolMsg.key.id);
+                    yield DatabaseService_js_1.databaseService.deleteMessageByWhatsappId(protocolMsg.key.id);
                     return;
                 }
                 const fromMe = msg.key.fromMe || false;
                 const pushName = msg.pushName || 'Desconhecido';
                 const messageContent = this.extractMessageContent(msg);
                 const timestamp = new Date(msg.messageTimestamp * 1000).toISOString();
-                const chatId = yield DatabaseService_1.databaseService.upsertChat(jid, instanceKey, pushName, messageContent, timestamp, isHistory, fromMe);
+                const chatId = yield DatabaseService_js_1.databaseService.upsertChat(jid, instanceKey, pushName, messageContent, timestamp, isHistory, fromMe);
                 if (!chatId)
                     return;
-                yield DatabaseService_1.databaseService.syncContactAndLead(chatId, jid, pushName, instanceKey, isHistory, fromMe);
+                yield DatabaseService_js_1.databaseService.syncContactAndLead(chatId, jid, pushName, instanceKey, isHistory, fromMe);
                 let mediaUrl;
                 if (this.isMediaMessage(msg)) {
                     mediaUrl = yield this.handleMediaDownload(msg, instanceKey);
                 }
-                yield DatabaseService_1.databaseService.saveMessage(chatId, instanceKey, msg, messageContent, fromMe, timestamp, mediaUrl);
+                yield DatabaseService_js_1.databaseService.saveMessage(chatId, instanceKey, msg, messageContent, fromMe, timestamp, mediaUrl);
             }
             catch (e) {
                 console.error(`❌ Erro no processamento da mensagem [${instanceKey}]:`, e);
@@ -302,7 +320,7 @@ class WhatsAppService {
     handleMediaDownload(msg, instanceKey) {
         return __awaiter(this, void 0, void 0, function* () {
             try {
-                const mediaUrl = yield MediaService_1.mediaService.processMedia(msg, instanceKey);
+                const mediaUrl = yield MediaService_js_1.mediaService.processMedia(msg, instanceKey);
                 return mediaUrl || undefined;
             }
             catch (e) {
@@ -315,8 +333,16 @@ class WhatsAppService {
         return __awaiter(this, void 0, void 0, function* () {
             try {
                 const state = this.instances.get(instanceKey);
-                if (!state || !state.sock)
-                    throw new Error(`Instância [${instanceKey}] não está conectada`);
+                // 🔥 SEGURANÇA: Verifica se a instância existe e se o 'sock' está pronto
+                if (!state || !state.sock) {
+                    console.log(`⚠️ Tentativa de envio ignorada: Instância [${instanceKey}] não inicializada.`);
+                    return { success: false, error: 'Instância não inicializada' };
+                }
+                // 🔥 SEGURANÇA: Verifica se o usuário da conexão já foi carregado (Evita o crash do 'id')
+                if (!state.sock.user || !state.sock.user.id) {
+                    console.log(`⚠️ Tentativa de envio ignorada: Instância [${instanceKey}] ainda está pareando.`);
+                    return { success: false, error: 'Conexão em fase de pareamento' };
+                }
                 let jid = to.includes('@') ? to : `${to}@s.whatsapp.net`;
                 const textToWhatsApp = userName ? `*${userName}*:\n${text}` : text;
                 let payload = { text: textToWhatsApp };
@@ -327,8 +353,9 @@ class WhatsAppService {
                 return { success: true, messageId: sent === null || sent === void 0 ? void 0 : sent.key.id };
             }
             catch (error) {
-                console.error(`❌ Erro fatal ao enviar mensagem [${instanceKey}]:`, error);
-                throw error;
+                // ✅ SOLUÇÃO DEFINITIVA: Loga o erro mas NÃO mata o servidor com 'throw'
+                console.error(`❌ Erro [${instanceKey}] ao enviar. Sistema segue vivo. Detalhe:`, error.message);
+                return { success: false, error: error.message };
             }
         });
     }
@@ -339,7 +366,7 @@ class WhatsAppService {
         return __awaiter(this, void 0, void 0, function* () {
             const state = this.instances.get(instanceKey);
             if (state === null || state === void 0 ? void 0 : state.sock) {
-                yield ConnectionManager_1.connectionManager.cleanupSocket(state.sock);
+                yield ConnectionManager_js_1.connectionManager.cleanupSocket(state.sock);
             }
             const authDir = path_1.default.join(this.baseAuthDir, instanceKey);
             if (fs_1.default.existsSync(authDir))

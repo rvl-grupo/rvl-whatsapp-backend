@@ -1,6 +1,6 @@
 import { WASocket, DisconnectReason } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
-import { databaseService } from './DatabaseService';
+import { databaseService } from './DatabaseService.js';
 
 export class ConnectionManager {
     private initializing: Map<string, boolean> = new Map();

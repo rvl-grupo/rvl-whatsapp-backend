@@ -1,6 +1,6 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { downloadMediaMessage, proto } from '@whiskeysockets/baileys';
-import pino from 'pino';
+import { pino } from 'pino';
 import { v4 as uuidv4 } from 'uuid';
 
 const logger = pino({ level: 'info' });

@@ -1,7 +1,13 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
-import { whatsappService } from './whatsapp';
+import { webcrypto } from 'node:crypto';
+import { whatsappService } from './whatsapp.js';
+
+// ✅ CORREÇÃO DE SEGURANÇA: Injeta a criptografia necessária para o Baileys v7
+if (!globalThis.crypto) {
+    (globalThis as any).crypto = webcrypto;
+}
 
 dotenv.config();
 

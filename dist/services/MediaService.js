@@ -8,16 +8,13 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
         step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
 };
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
-};
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.mediaService = exports.MediaService = void 0;
 const supabase_js_1 = require("@supabase/supabase-js");
 const baileys_1 = require("@whiskeysockets/baileys");
-const pino_1 = __importDefault(require("pino"));
+const pino_1 = require("pino");
 const uuid_1 = require("uuid");
-const logger = (0, pino_1.default)({ level: 'info' });
+const logger = (0, pino_1.pino)({ level: 'info' });
 const supabaseUrl = process.env.SUPABASE_URL || '';
 const supabaseKey = process.env.SUPABASE_KEY || '';
 class MediaService {

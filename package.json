@@ -2,10 +2,11 @@
     "name": "rvl-whatsapp-backend",
     "version": "1.0.0",
     "description": "WhatsApp Multi-Device CRM Backend using Baileys",
+    "type": "module",
     "main": "dist/server.js",
     "scripts": {
         "start": "node dist/server.js",
-        "dev": "ts-node-dev --respawn --transpile-only src/server.ts",
+        "dev": "NODE_OPTIONS='--loader ts-node/esm' ts-node-dev --respawn --transpile-only src/server.ts",
         "build": "tsc"
     },
     "dependencies": {
