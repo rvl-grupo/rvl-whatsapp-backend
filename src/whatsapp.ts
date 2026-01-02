@@ -42,7 +42,8 @@ export class WhatsAppService {
     private baseAuthDir = path.resolve(__dirname, '..', 'sessions');
 
     constructor() {
-        this.loadExistingSessions();
+        // DESABILITADO: Auto-inicialização causa múltiplas conexões simultâneas
+        // this.loadExistingSessions();
     }
 
     private async loadExistingSessions() {
