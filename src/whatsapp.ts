@@ -103,16 +103,9 @@ export class WhatsAppService {
                 linkPreviewImageThumbnailWidth: 192,
             });
 
+            // Inicializa a instância no Map com status inicial
             this.instances.set(instanceKey, { sock, qr: null, status: 'connecting' });
             await databaseService.syncInstanceStatus(instanceKey, 'connecting', null);
-
-            // 🔥 ITEM 3: Cleanup de Listeners (Memory Leak Fix)
-            // Removemos qualquer listener antigo para esta instância antes de registrar novos
-            sock.ev.removeAllListeners('creds.update');
-            sock.ev.removeAllListeners('connection.update');
-            sock.ev.removeAllListeners('messages.upsert');
-            sock.ev.removeAllListeners('messaging-history.set');
-            sock.ev.removeAllListeners('messages.update');
 
             // Listeners
             sock.ev.on('creds.update', saveCreds);
